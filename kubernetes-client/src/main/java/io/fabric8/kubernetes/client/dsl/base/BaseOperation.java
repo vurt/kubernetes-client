@@ -18,7 +18,7 @@ package io.fabric8.kubernetes.client.dsl.base;
 import com.squareup.okhttp.HttpUrl;
 import com.squareup.okhttp.OkHttpClient;
 import com.squareup.okhttp.Request;
-import io.fabric8.kubernetes.api.builder.Visitor;
+import io.fabric8.kubernetes.api.builder.Function;
 import io.fabric8.kubernetes.api.model.Doneable;
 import io.fabric8.kubernetes.api.model.KubernetesResourceList;
 import io.fabric8.kubernetes.api.model.RootPaths;
@@ -30,6 +30,7 @@ import io.fabric8.kubernetes.client.Watcher;
 import io.fabric8.kubernetes.client.dsl.ClientMixedOperation;
 import io.fabric8.kubernetes.client.dsl.ClientNonNamespaceOperation;
 import io.fabric8.kubernetes.client.dsl.ClientResource;
+import io.fabric8.kubernetes.client.dsl.Deletable;
 import io.fabric8.kubernetes.client.dsl.EditReplaceDeletable;
 import io.fabric8.kubernetes.client.dsl.FilterWatchListDeletable;
 import io.fabric8.kubernetes.client.dsl.Gettable;
@@ -71,11 +72,12 @@ public class BaseOperation<T, L extends KubernetesResourceList, D extends Doneab
   private final Class<D> doneableType;
   private final String resourceVersion;
   private final Boolean reloadingFromServer;
+  private final long gracePeriodSeconds;
 
   private boolean reaping;
   protected Reaper reaper;
 
-  protected BaseOperation(OkHttpClient client, Config config, String apiGroup, String apiVersion, String resourceT, String namespace, String name, Boolean cascading, T item, String resourceVersion, Boolean reloadingFromServer) {
+  protected BaseOperation(OkHttpClient client, Config config, String apiGroup, String apiVersion, String resourceT, String namespace, String name, Boolean cascading, T item, String resourceVersion, Boolean reloadingFromServer, long gracePeriodSeconds) {
     super(client, config, apiGroup, apiVersion, resourceT, namespace, name);
     this.cascading = cascading;
     this.item = item;
@@ -85,6 +87,7 @@ public class BaseOperation<T, L extends KubernetesResourceList, D extends Doneab
     this.doneableType = (Class<D>) ((ParameterizedType) getClass().getGenericSuperclass()).getActualTypeArguments()[2];
     this.reaper = null;
     this.resourceVersion = resourceVersion;
+    this.gracePeriodSeconds = gracePeriodSeconds;
   }
 
   protected BaseOperation(OkHttpClient client, Config config, String apiGroup, String apiVersion, String resourceT, String namespace, String name, Boolean cascading, T item, String resourceVersion, Boolean reloadingFromServer, Class<T> type, Class<L> listType, Class<D> doneableType) {
@@ -97,6 +100,7 @@ public class BaseOperation<T, L extends KubernetesResourceList, D extends Doneab
     this.listType = listType;
     this.doneableType = doneableType;
     this.reaper = null;
+    this.gracePeriodSeconds = -1;
   }
 
   @Override
@@ -157,8 +161,8 @@ public class BaseOperation<T, L extends KubernetesResourceList, D extends Doneab
     }
     try {
       return (R) getClass()
-        .getConstructor(OkHttpClient.class, Config.class, String.class, String.class, String.class, Boolean.class, type, String.class, Boolean.class)
-        .newInstance(client, config, apiVersion, namespace, name, cascading, item, resourceVersion, reloadingFromServer);
+        .getConstructor(OkHttpClient.class, Config.class, String.class, String.class, String.class, Boolean.class, type, String.class, Boolean.class, long.class)
+        .newInstance(client, config, apiVersion, namespace, name, cascading, item, resourceVersion, reloadingFromServer, gracePeriodSeconds);
     } catch (Throwable t) {
       throw KubernetesClientException.launderThrowable(t);
     }
@@ -168,8 +172,8 @@ public class BaseOperation<T, L extends KubernetesResourceList, D extends Doneab
   public ClientNonNamespaceOperation<T, L, D, R> inNamespace(String namespace) {
     try {
       return getClass()
-        .getConstructor(OkHttpClient.class, Config.class, String.class, String.class, String.class, Boolean.class, type, String.class, Boolean.class)
-        .newInstance(client, config, apiVersion, namespace, name, cascading, item, resourceVersion, reloadingFromServer);
+        .getConstructor(OkHttpClient.class, Config.class, String.class, String.class, String.class, Boolean.class, type, String.class, Boolean.class, long.class)
+        .newInstance(client, config, apiVersion, namespace, name, cascading, item, resourceVersion, reloadingFromServer, gracePeriodSeconds);
     } catch (Throwable t) {
       throw KubernetesClientException.launderThrowable(t);
     }
@@ -185,8 +189,8 @@ public class BaseOperation<T, L extends KubernetesResourceList, D extends Doneab
   public EditReplaceDeletable<T, T, D, Boolean> cascading(boolean cascading) {
     try {
       return getClass()
-        .getConstructor(OkHttpClient.class, Config.class, String.class, String.class, String.class, Boolean.class, type, String.class, Boolean.class)
-        .newInstance(client, config, apiVersion, namespace, name, cascading, item, resourceVersion, reloadingFromServer);
+        .getConstructor(OkHttpClient.class, Config.class, String.class, String.class, String.class, Boolean.class, type, String.class, Boolean.class, long.class)
+        .newInstance(client, config, apiVersion, namespace, name, cascading, item, resourceVersion, reloadingFromServer, gracePeriodSeconds);
     } catch (Throwable t) {
       throw KubernetesClientException.launderThrowable(t);
     }
@@ -196,8 +200,8 @@ public class BaseOperation<T, L extends KubernetesResourceList, D extends Doneab
   public R load(InputStream is) {
     try {
       return (R) getClass()
-        .getConstructor(OkHttpClient.class, Config.class, String.class, String.class, String.class, Boolean.class, type, String.class, Boolean.class)
-        .newInstance(client, config, apiVersion, namespace, name, cascading, unmarshal(is, type), resourceVersion, reloadingFromServer);
+        .getConstructor(OkHttpClient.class, Config.class, String.class, String.class, String.class, Boolean.class, type, String.class, Boolean.class, long.class)
+        .newInstance(client, config, apiVersion, namespace, name, cascading, unmarshal(is, type), resourceVersion, reloadingFromServer, gracePeriodSeconds);
     } catch (Throwable t) {
       throw KubernetesClientException.launderThrowable(t);
     }
@@ -207,8 +211,8 @@ public class BaseOperation<T, L extends KubernetesResourceList, D extends Doneab
   public Gettable<T> fromServer() {
     try {
       return (R) getClass()
-              .getConstructor(OkHttpClient.class, Config.class, String.class, String.class, String.class, Boolean.class, type, String.class, Boolean.class)
-              .newInstance(client, config, apiVersion, namespace, name, cascading, item, resourceVersion, true);
+              .getConstructor(OkHttpClient.class, Config.class, String.class, String.class, String.class, Boolean.class, type, String.class, Boolean.class, long.class)
+              .newInstance(client, config, apiVersion, namespace, name, cascading, item, resourceVersion, true, gracePeriodSeconds);
     } catch (Throwable t) {
       throw KubernetesClientException.launderThrowable(t);
     }
@@ -233,11 +237,11 @@ public class BaseOperation<T, L extends KubernetesResourceList, D extends Doneab
 
   @Override
   public D createNew() throws KubernetesClientException {
-    final Visitor<T> visitor = new Visitor<T>() {
+    final Function<T, T> visitor = new Function<T, T>() {
       @Override
-      public void visit(T resource) {
+      public T apply(T resource) {
         try {
-          create(resource);
+          return create(resource);
         } catch (Exception e) {
           throw KubernetesClientException.launderThrowable(e);
         }
@@ -245,7 +249,7 @@ public class BaseOperation<T, L extends KubernetesResourceList, D extends Doneab
     };
 
     try {
-      return getDoneableType().getDeclaredConstructor(Visitor.class).newInstance(visitor);
+      return getDoneableType().getDeclaredConstructor(Function.class).newInstance(visitor);
     } catch (InvocationTargetException | NoSuchMethodException | IllegalAccessException | InstantiationException e) {
       throw KubernetesClientException.launderThrowable(e);
     }
@@ -423,7 +427,7 @@ public class BaseOperation<T, L extends KubernetesResourceList, D extends Doneab
   public Boolean delete(List<T> items) {
     try {
       for (T item : items) {
-        handleDelete(item);
+        handleDelete(item, gracePeriodSeconds);
       }
     } catch (KubernetesClientException e) {
       if (e.getCode() != 404) {
@@ -439,9 +443,9 @@ public class BaseOperation<T, L extends KubernetesResourceList, D extends Doneab
   void deleteThis() throws KubernetesClientException {
     try {
       if (item != null) {
-        handleDelete(item);
+        handleDelete(item, gracePeriodSeconds);
       } else {
-        handleDelete(getResourceUrl());
+        handleDelete(getResourceUrl(), gracePeriodSeconds);
       }
     } catch (Exception e) {
       throw KubernetesClientException.launderThrowable(e);
@@ -456,8 +460,8 @@ public class BaseOperation<T, L extends KubernetesResourceList, D extends Doneab
   public Watchable<Watch, Watcher<T>> withResourceVersion(String resourceVersion) {
     try {
       return getClass()
-              .getConstructor(OkHttpClient.class, Config.class, String.class, String.class, String.class, Boolean.class, type, String.class)
-              .newInstance(client, config, apiVersion, namespace, name, cascading, item, resourceVersion);
+              .getConstructor(OkHttpClient.class, Config.class, String.class, String.class, String.class, Boolean.class, type, String.class, Boolean.class, long.class)
+              .newInstance(client, config, apiVersion, namespace, name, cascading, item, resourceVersion, false, gracePeriodSeconds);
     } catch (Throwable t) {
       throw KubernetesClientException.launderThrowable(t);
     }
@@ -486,7 +490,7 @@ public class BaseOperation<T, L extends KubernetesResourceList, D extends Doneab
     throw new KubernetesClientException("Cannot update read-only resources");
   }
 
-  public boolean isNamespaceRequired() {
+  public boolean isResourceNamespaced() {
     return true;
   }
 
@@ -522,6 +526,10 @@ public class BaseOperation<T, L extends KubernetesResourceList, D extends Doneab
     return reloadingFromServer;
   }
 
+  public Long getGracePeriodSeconds() {
+    return gracePeriodSeconds;
+  }
+
   public String getResourceT() {
     return resourceT;
   }
@@ -544,5 +552,17 @@ public class BaseOperation<T, L extends KubernetesResourceList, D extends Doneab
 
   protected void setReaping(boolean reaping) {
     this.reaping = reaping;
+  }
+
+  @Override
+  public Deletable<Boolean> withGracePeriod(long gracePeriodSeconds)
+  {
+    try {
+      return getClass()
+        .getConstructor(OkHttpClient.class, Config.class, String.class, String.class, String.class, Boolean.class, type, String.class, Boolean.class, long.class)
+        .newInstance(client, config, apiVersion, namespace, name, cascading, item, resourceVersion, reloadingFromServer, gracePeriodSeconds);
+    } catch (Throwable t) {
+      throw KubernetesClientException.launderThrowable(t);
+    }
   }
 }

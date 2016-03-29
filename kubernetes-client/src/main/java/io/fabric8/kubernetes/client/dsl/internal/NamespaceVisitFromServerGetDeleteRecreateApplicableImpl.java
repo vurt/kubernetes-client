@@ -18,6 +18,8 @@ package io.fabric8.kubernetes.client.dsl.internal;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mifmif.common.regex.Generex;
 import com.squareup.okhttp.OkHttpClient;
+import io.fabric8.kubernetes.api.builder.VisitableBuilder;
+import io.fabric8.kubernetes.api.builder.Visitor;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.KubernetesList;
 import io.fabric8.kubernetes.api.model.KubernetesListBuilder;
@@ -26,9 +28,7 @@ import io.fabric8.kubernetes.client.Handlers;
 import io.fabric8.kubernetes.client.HasMetadataVisitiableBuilder;
 import io.fabric8.kubernetes.client.KubernetesClientException;
 import io.fabric8.kubernetes.client.ResourceHandler;
-import io.fabric8.kubernetes.client.dsl.GetApplyDeletable;
-import io.fabric8.kubernetes.client.dsl.Gettable;
-import io.fabric8.kubernetes.client.dsl.NamespaceGetApplyDeletable;
+import io.fabric8.kubernetes.client.dsl.*;
 import io.fabric8.kubernetes.client.dsl.base.OperationSupport;
 import io.fabric8.kubernetes.client.handlers.KubernetesListHandler;
 import io.fabric8.kubernetes.client.utils.ResourceCompare;
@@ -43,39 +43,56 @@ import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
 
-public class NamespaceGetApplyDeletableImpl extends OperationSupport implements NamespaceGetApplyDeletable<List<HasMetadata>, Boolean> {
+public class NamespaceVisitFromServerGetDeleteRecreateApplicableImpl extends OperationSupport implements NamespaceVisitFromServerGetDeleteRecreateApplicable<List<HasMetadata>, Boolean> {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(NamespaceGetApplyDeletableImpl.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(NamespaceVisitFromServerGetDeleteRecreateApplicableImpl.class);
     private static final String EXPRESSION = "expression";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private final String namespace;
-    private final Boolean fromServer;
-    private final Object item;
-    private final ResourceHandler hanlder;
 
-    public NamespaceGetApplyDeletableImpl(OkHttpClient client, Config config, String namespace, Boolean fromServer, InputStream is) {
-        this(client, config, namespace, fromServer, unmarshal(is));
+    private final Boolean fromServer;
+    private final Boolean deletingExisting;
+    private final List<Visitor> visitors;
+    private final Object item;
+    private final ResourceHandler handler;
+    private final long gracePeriodSeconds;
+
+    public NamespaceVisitFromServerGetDeleteRecreateApplicableImpl(OkHttpClient client, Config config, String namespace, Boolean fromServer, Boolean deletingExisting, List<Visitor> visitors, InputStream is) {
+        this(client, config, namespace, fromServer, deletingExisting, visitors, unmarshal(is), -1);
     }
 
-    public NamespaceGetApplyDeletableImpl(OkHttpClient client, Config config, String namespace, Boolean fromServer, Object item) {
+    public NamespaceVisitFromServerGetDeleteRecreateApplicableImpl(OkHttpClient client, Config config, String namespace, Boolean fromServer, Boolean deletingExisting, List<Visitor> visitors, Object item, long gracePeriodSeconds) {
         super(client, config, null, null, null, null, null);
         this.namespace = namespace;
         this.fromServer = fromServer;
+        this.deletingExisting = deletingExisting;
+        this.visitors = visitors != null ? visitors : new ArrayList<Visitor>();
         this.item = item;
-        this.hanlder = handlerOf(item);
-        if (hanlder == null) {
+        this.handler = handlerOf(item);
+        if (handler == null) {
             throw new KubernetesClientException("No handler found for object:" + item);
         }
+        this.gracePeriodSeconds = gracePeriodSeconds;
     }
 
     @Override
     public List<HasMetadata> apply() {
         List<HasMetadata> result = new ArrayList<>();
-        for (HasMetadata meta : asHasMetadata(item, true)) {
+        for (HasMetadata meta : acceptVisitors(asHasMetadata(item, true), visitors)) {
             ResourceHandler<HasMetadata, HasMetadataVisitiableBuilder> h = handlerOf(meta);
             HasMetadata r = h.reload(client, config, namespace, meta);
             if (r == null) {
+                HasMetadata created = h.create(client, config, namespace, meta);
+                if (created != null) {
+                    result.add(created);
+                }
+            } else if(deletingExisting) {
+                Boolean deleted = h.delete(client, config, namespace, meta);
+                if (!deleted) {
+                    throw new KubernetesClientException("Failed to delete existing item:" + meta);
+                }
+
                 HasMetadata created = h.create(client, config, namespace, meta);
                 if (created != null) {
                     result.add(created);
@@ -119,15 +136,34 @@ public class NamespaceGetApplyDeletableImpl extends OperationSupport implements 
                 ResourceHandler<HasMetadata, HasMetadataVisitiableBuilder> h = handlerOf(meta);
                 HasMetadata reloaded = h.reload(client, config, namespace, meta);
                 if (reloaded != null) {
+                    HasMetadata edited = reloaded;
+                    //Let's apply any visitor that might have been specified.
+                    for (Visitor v : visitors) {
+                        h.edit(edited).accept(v).build();
+                    }
                     result.add(reloaded);
                 }
             }
             return result;
         } else {
-            return asHasMetadata(item, false);
+            return acceptVisitors(asHasMetadata(item, true), visitors);
         }
     }
 
+    private static List<HasMetadata> acceptVisitors(List<HasMetadata> list, List<Visitor> visitors) {
+        List<HasMetadata> result = new ArrayList<>();
+        for (HasMetadata item : list) {
+            ResourceHandler<HasMetadata, HasMetadataVisitiableBuilder> h = handlerOf(item);
+            VisitableBuilder<HasMetadata, ?> builder = h.edit(item);
+
+            //Let's apply any visitor that might have been specified.
+            for (Visitor v : visitors) {
+                builder.accept(v);
+            }
+            result.add(builder.build());
+        }
+        return result;
+    }
 
     private static <T> List<HasMetadata> asHasMetadata(T item, Boolean enableProccessing) {
         List<HasMetadata> result = new ArrayList<>();
@@ -210,12 +246,29 @@ public class NamespaceGetApplyDeletableImpl extends OperationSupport implements 
     }
 
     @Override
-    public GetApplyDeletable<List<HasMetadata>, Boolean> inNamespace(String namespace) {
-        return new NamespaceGetApplyDeletableImpl(client, config, namespace, fromServer, item);
+    public VisitFromServerGetDeleteRecreateApplicable<List<HasMetadata>, Boolean> inNamespace(String namespace) {
+        return new NamespaceVisitFromServerGetDeleteRecreateApplicableImpl(client, config, namespace, fromServer, deletingExisting, visitors, item, gracePeriodSeconds);
     }
 
     @Override
     public Gettable<List<HasMetadata>> fromServer() {
-        return new NamespaceGetApplyDeletableImpl(client, config, namespace, true, item);
+        return new NamespaceVisitFromServerGetDeleteRecreateApplicableImpl(client, config, namespace, true, deletingExisting, visitors, item, gracePeriodSeconds);
     }
+
+    @Override
+    public Applicable<List<HasMetadata>> deletingExisting() {
+        return new NamespaceVisitFromServerGetDeleteRecreateApplicableImpl(client, config, namespace, fromServer, true, visitors, item, gracePeriodSeconds);
+    }
+
+    @Override
+    public VisitFromServerGetDeleteRecreateApplicable<List<HasMetadata>, Boolean> accept(Visitor visitor) {
+        List<Visitor> newVisitors = new ArrayList<>(visitors);
+        newVisitors.add(visitor);
+        return new NamespaceVisitFromServerGetDeleteRecreateApplicableImpl(client, config, namespace, fromServer, true, newVisitors, item, gracePeriodSeconds);
+    }
+
+  @Override public Deletable<Boolean> withGracePeriod(long gracePeriodSeconds)
+  {
+    return new NamespaceVisitFromServerGetDeleteRecreateApplicableImpl(client, config, namespace, fromServer, true, visitors, item, gracePeriodSeconds);
+  }
 }

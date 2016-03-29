@@ -13,10 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package io.fabric8.kubernetes.client;
 
-package io.fabric8.kubernetes.client.dsl;
+public final class Version {
+  public static String clientVersion() {
+    return "${project.version}";
+  }
 
-public interface NamespaceGetApplyDeletable<T, B> extends GetApplyDeletable<T, B>, Namespaceable<GetApplyDeletable<T, B>>
-{
-
+  private Version() {
+  }
 }

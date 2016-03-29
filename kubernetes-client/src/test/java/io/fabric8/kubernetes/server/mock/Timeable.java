@@ -18,10 +18,10 @@ package io.fabric8.kubernetes.server.mock;
 
 public interface Timeable<T> {
 
-  void always();
+  T always();
 
-  void once();
+  T once();
 
-  void times(int times);
+  T times(int times);
 
 }

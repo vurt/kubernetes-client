@@ -24,6 +24,7 @@ import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.api.model.PodCondition;
 import io.fabric8.kubernetes.api.model.PodList;
 import io.fabric8.kubernetes.api.model.ReplicationController;
+import io.fabric8.kubernetes.api.model.ReplicationControllerBuilder;
 import io.fabric8.kubernetes.api.model.ReplicationControllerList;
 import io.fabric8.kubernetes.client.Client;
 import io.fabric8.kubernetes.client.Config;
@@ -89,7 +90,11 @@ class RollingUpdater<C extends Client> {
 
       for (Pod pod : oldRCPods.getItems()) {
         pod.getMetadata().getLabels().put(DEPLOYMENT_KEY, oldDeploymentHash);
-        pods().inNamespace(namespace).withName(pod.getMetadata().getName()).replace(pod);
+        try {
+          pods().inNamespace(namespace).withName(pod.getMetadata().getName()).replace(pod);
+        } catch (KubernetesClientException e) {
+          LOG.warn("Unable to add deployment key to pod: {}", e.getMessage());
+        }
       }
 
       // Now we can update the old RC with the new selector
@@ -97,30 +102,36 @@ class RollingUpdater<C extends Client> {
       oldRC.getSpec().getTemplate().getMetadata().getLabels().put(DEPLOYMENT_KEY, oldDeploymentHash);
       replicationControllers().inNamespace(namespace).withName(oldRCName).cascading(false).replace(oldRC);
 
-      // Ensure it looks like a new RC
-      newRC.getMetadata().setResourceVersion(null);
-
-      int requestedNewReplicas = newRC.getSpec().getReplicas();
-
-      // Set the new RC replicas to 0 before we do anything so we can scale up ourselves
-      newRC.getSpec().setReplicas(0);
-
-      // Set the selector for the new deployment
+      // Get a hash of the new RC for
       String newDeploymentHash = md5sum(newRC);
-      newRC.getSpec().getSelector().put(DEPLOYMENT_KEY, newDeploymentHash);
-      newRC.getSpec().getTemplate().getMetadata().getLabels().put(DEPLOYMENT_KEY, newDeploymentHash);
 
+      // And a name for the cloned RC
       String newRCName = newRC.getMetadata().getName();
-
       if (newRCName == null || newRCName.equals(oldRC.getMetadata().getName())) {
-        newRC.getMetadata().setName(oldRCName + "-" + newDeploymentHash);
+        newRCName = newRCName + "-" + newDeploymentHash;
       }
 
-      ReplicationController createdRC = replicationControllers().inNamespace(namespace).create(newRC);
+      // Create a clone of the requested RC ready for the rolling update:
+      //   - Set the new RC replicas to 0 before we do anything so we can scale up ourselves.
+      //   - Set the new RC name to contain the hash if matches old RC name.
+      //   - Add selector containing deployment hash.
+      //   - Ensure it looks like a new RC by resetting resource version.
+      ReplicationController clonedRC = new ReplicationControllerBuilder(newRC)
+          .editMetadata()
+            .withResourceVersion(null)
+            .withName(newRCName)
+          .endMetadata()
+          .editSpec()
+            .withReplicas(0).addToSelector(DEPLOYMENT_KEY, newDeploymentHash)
+            .editTemplate().editMetadata().addToLabels(DEPLOYMENT_KEY, newDeploymentHash).endMetadata().endTemplate()
+          .endSpec()
+          .build();
+
+      ReplicationController createdRC = replicationControllers().inNamespace(namespace).create(clonedRC);
 
       // Now do the scale up/scale down dance
       int oldReplicas = oldRC.getSpec().getReplicas();
-      while (createdRC.getSpec().getReplicas() < requestedNewReplicas) {
+      while (createdRC.getSpec().getReplicas() < newRC.getSpec().getReplicas()) {
         int newReplicas = createdRC.getSpec().getReplicas() + 1;
         replicationControllers().inNamespace(namespace).withName(createdRC.getMetadata().getName()).scale(newReplicas, true);
         waitUntilPodsAreReady(createdRC, namespace, newReplicas);
@@ -136,13 +147,13 @@ class RollingUpdater<C extends Client> {
       replicationControllers().inNamespace(namespace).withName(oldRCName).delete();
 
       // Check if we need to rename it back to the original RC name
-      if (Objects.equals(oldRCName, newRCName)) {
+      if (Objects.equals(oldRCName, newRC.getMetadata().getName())) {
         createdRC.getMetadata().setResourceVersion(null);
         createdRC.getMetadata().setName(oldRCName);
 
         createdRC = replicationControllers().inNamespace(namespace).create(createdRC);
 
-        replicationControllers().inNamespace(namespace).withName(oldRCName + "-" + newDeploymentHash).cascading(false).delete();
+        replicationControllers().inNamespace(namespace).withName(newRCName).cascading(false).delete();
 
         Map<String, String> createdRCSelector = createdRC.getSpec().getSelector();
         createdRCSelector.remove(DEPLOYMENT_KEY);

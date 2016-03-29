@@ -15,6 +15,7 @@
  */
 package io.fabric8.kubernetes.client.dsl.base;
 
+import com.fasterxml.jackson.core.JsonParseException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.squareup.okhttp.MediaType;
@@ -22,10 +23,8 @@ import com.squareup.okhttp.OkHttpClient;
 import com.squareup.okhttp.Request;
 import com.squareup.okhttp.RequestBody;
 import com.squareup.okhttp.Response;
-import io.fabric8.kubernetes.api.model.HasMetadata;
-import io.fabric8.kubernetes.api.model.KubernetesResource;
-import io.fabric8.kubernetes.api.model.Status;
-import io.fabric8.kubernetes.api.model.StatusBuilder;
+import com.squareup.okhttp.ResponseBody;
+import io.fabric8.kubernetes.api.model.*;
 import io.fabric8.kubernetes.client.Config;
 import io.fabric8.kubernetes.client.KubernetesClientException;
 import io.fabric8.kubernetes.client.utils.URLUtils;
@@ -41,11 +40,11 @@ import java.util.concurrent.ExecutionException;
 public class OperationSupport {
 
 
-  public static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
+  public static final MediaType JSON = MediaType.parse("application/json");
   protected static final ObjectMapper JSON_MAPPER = new ObjectMapper();
   protected static final ObjectMapper YAML_MAPPER = new ObjectMapper(new YAMLFactory());
   private static final String CLIENT_STATUS_FLAG = "CLIENT_STATUS_FLAG";
-  
+
   protected final OkHttpClient client;
   protected final Config config;
   protected final String resourceT;
@@ -94,8 +93,8 @@ public class OperationSupport {
     return name;
   }
 
-  public boolean isNamespaceRequired() {
-    return false;
+  public boolean isResourceNamespaced() {
+    return true;
   }
 
   public URL getRootUrl() {
@@ -111,7 +110,9 @@ public class OperationSupport {
 
   public URL getNamespacedUrl(String namespace) throws MalformedURLException {
     URL requestUrl = getRootUrl();
-    if (namespace != null) {
+    if (!isResourceNamespaced()) {
+      //if resource is not namespaced don't even bother to check the namespace.
+    } else if (Utils.isNotNullOrEmpty(namespace)) {
       requestUrl = new URL(URLUtils.join(requestUrl.toString(), "namespaces", namespace));
     }
     requestUrl = new URL(URLUtils.join(requestUrl.toString(), resourceT));
@@ -140,7 +141,7 @@ public class OperationSupport {
     String operationNs = getNamespace();
     String itemNs = (item instanceof HasMetadata && ((HasMetadata)item).getMetadata() != null) ? ((HasMetadata) item).getMetadata().getNamespace() : null;
     if (Utils.isNullOrEmpty(operationNs) && Utils.isNullOrEmpty(itemNs)) {
-      if (!isNamespaceRequired()) {
+      if (!isResourceNamespaced()) {
         return null;
       } else {
         throw new KubernetesClientException("Namespace not specified. But operation requires namespace.");
@@ -171,12 +172,19 @@ public class OperationSupport {
   }
 
 
-  protected <T> void handleDelete(T resource) throws ExecutionException, InterruptedException, KubernetesClientException, IOException {
-    handleDelete(getResourceUrl(checkNamespace(resource), checkName(resource)));
+  protected <T> void handleDelete(T resource, long gracePeriodSeconds) throws ExecutionException, InterruptedException, KubernetesClientException, IOException {
+    handleDelete(getResourceUrl(checkNamespace(resource), checkName(resource)), gracePeriodSeconds);
   }
 
-  protected void handleDelete(URL requestUrl) throws ExecutionException, InterruptedException, KubernetesClientException, IOException {
-    Request.Builder requestBuilder = new Request.Builder().delete(null).url(requestUrl);
+  protected void handleDelete(URL requestUrl, long gracePeriodSeconds) throws ExecutionException, InterruptedException, KubernetesClientException, IOException {
+    RequestBody requestBody = null;
+    if (gracePeriodSeconds >= 0) {
+      DeleteOptions deleteOptions = new DeleteOptions();
+      deleteOptions.setGracePeriodSeconds(gracePeriodSeconds);
+      requestBody = RequestBody.create(JSON, JSON_MAPPER.writeValueAsString(deleteOptions));
+    }
+
+    Request.Builder requestBuilder = new Request.Builder().delete(requestBody).url(requestUrl);
     handleResponse(requestBuilder, 200, null);
   }
 
@@ -199,17 +207,19 @@ public class OperationSupport {
 
   protected <T> T handleResponse(Request.Builder requestBuilder, int successStatusCode, Class<T> type) throws ExecutionException, InterruptedException, KubernetesClientException, IOException {
     Request request = requestBuilder.build();
-    Response response = null;
-    try {
-      response = client.newCall(request).execute();
+    Response response = client.newCall(request).execute();
+    try (ResponseBody body = response.body()) {
+      assertResponseCode(request, response, successStatusCode);
+      if (type != null) {
+        return JSON_MAPPER.readValue(body.byteStream(), type);
+      } else {
+        return null;
+      }
     } catch (Exception e) {
+      if (e instanceof KubernetesClientException) {
+        throw e;
+      }
       throw requestException(request, e);
-    }
-    assertResponseCode(request, response, successStatusCode);
-    if (type != null) {
-      return JSON_MAPPER.readValue(response.body().byteStream(), type);
-    } else {
-      return null;
     }
   }
 
@@ -230,16 +240,32 @@ public class OperationSupport {
     } else if (customMessage != null) {
       throw requestFailure(request, createStatus(statusCode, customMessage));
     } else {
-      try {
-        Status status = JSON_MAPPER.readValue(response.body().byteStream(), Status.class);
-        throw requestFailure(request, status);
-      } catch (IOException e) {
-        throw requestFailure(request, createStatus(statusCode, ""));
-      }
+      throw requestFailure(request, createStatus(response));
     }
   }
 
-  Status createStatus(int statusCode, String message) {
+
+  public static Status createStatus(Response response) {
+    int statusCode = response.code();
+    String statusMessage = "";
+    ResponseBody body = response != null ? response.body() : null;
+    try {
+      if (response == null) {
+        statusMessage = "No response";
+      } else if (body != null) {
+        statusMessage = body.string();
+      } else if (response.message() != null) {
+        statusMessage = response.message();
+      }
+      return JSON_MAPPER.readValue(statusMessage, Status.class);
+    } catch (JsonParseException e) {
+      return createStatus(statusCode, statusMessage);
+    } catch (IOException e) {
+      return createStatus(statusCode, statusMessage);
+    }
+  }
+
+  public static Status createStatus(int statusCode, String message) {
     Status status = new StatusBuilder()
             .withCode(statusCode)
             .withMessage(message)

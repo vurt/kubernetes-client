@@ -26,7 +26,6 @@ import com.squareup.okhttp.ws.WebSocketCall;
 import com.squareup.okhttp.ws.WebSocketListener;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.KubernetesResourceList;
-import io.fabric8.kubernetes.api.model.Status;
 import io.fabric8.kubernetes.api.model.WatchEvent;
 import io.fabric8.kubernetes.client.KubernetesClientException;
 import io.fabric8.kubernetes.client.Watch;
@@ -41,6 +40,8 @@ import java.net.ConnectException;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -59,6 +60,7 @@ public class WatchConnectionManager<T, L extends KubernetesResourceList> impleme
   private final AtomicReference<WebSocket> webSocketRef = new AtomicReference<>();
   private WebSocketCall webSocketCall;
   private OkHttpClient clonedClient;
+  private ExecutorService executor = Executors.newSingleThreadExecutor();
 
   public WatchConnectionManager(final OkHttpClient client, final BaseOperation<T, L, ?, ?> baseOperation, final String version, final Watcher<T> watcher, final int reconnectInterval, final int reconnectLimit) throws InterruptedException, ExecutionException, MalformedURLException {
     if (version == null) {
@@ -119,21 +121,22 @@ public class WatchConnectionManager<T, L extends KubernetesResourceList> impleme
 
       @Override
       public void onFailure(IOException e, Response response) {
-        if (!forceClosed.get()) {
-          if (response != null && response.body() != null) {
-            try (ResponseBody body = response.body()) {
-              Status responseStatus = mapper.readValue(body.byteStream(), Status.class);
-              watcher.onClose(
-                new KubernetesClientException("Connection unexpectedly closed", response.code(),
-                                              responseStatus));
-              return;
-            } catch (IOException ioe) {
-              // that's fine, we'll call onClose later without response info
-            }
+        e.printStackTrace();
+        try {
+          if (response != null && response.body() != null){
+            response.body().close();
           }
-
-          watcher.onClose(new KubernetesClientException("Connection unexpectedly closed", e));
+        } catch (IOException e1) {
+          e1.printStackTrace();
         }
+
+        if (forceClosed.get()) {
+          executor.shutdownNow();
+          watcher.onClose(null);
+          return;
+        }
+
+        onClose(4000, "Connection unexpectedly closed");
       }
 
       @Override
@@ -166,29 +169,36 @@ public class WatchConnectionManager<T, L extends KubernetesResourceList> impleme
       }
 
       @Override
-      public void onClose(int code, String reason) {
-        if (!forceClosed.get()) {
-          try {
-            runWatch();
-          } catch (ExecutionException e) {
-            if (e.getCause() != null && e.getCause().getCause() != null && e.getCause().getCause() instanceof ConnectException) {
-              if (reconnectLimit >= 0 && currentReconnectAttempt.getAndIncrement() >= reconnectLimit) {
-                watcher.onClose(new KubernetesClientException("Connection unexpectedly closed", e));
-                return;
-              }
-              try {
-                TimeUnit.MILLISECONDS.sleep(reconnectInterval);
-              } catch (InterruptedException e1) {
-                watcher.onClose(new KubernetesClientException("Connection unexpectedly closed", e1));
-                return;
-              }
-              onClose(code, reason);
-            }
-          } catch (MalformedURLException | InterruptedException e) {
-            throw KubernetesClientException.launderThrowable(e);
-          }
+      public void onClose(final int code, final String reason) {
+        if (forceClosed.get()) {
+          executor.shutdownNow();
+          watcher.onClose(null);
+          return;
         }
-        watcher.onClose(null);
+        executor.submit(new Runnable() {
+          @Override
+          public void run() {
+            try {
+              runWatch();
+            } catch (ExecutionException e) {
+              if (e.getCause() != null && e.getCause().getCause() != null && e.getCause().getCause() instanceof ConnectException) {
+                if (reconnectLimit >= 0 && currentReconnectAttempt.getAndIncrement() >= reconnectLimit) {
+                  watcher.onClose(new KubernetesClientException("Connection unexpectedly closed", e));
+                  return;
+                }
+                try {
+                  TimeUnit.MILLISECONDS.sleep(reconnectInterval);
+                } catch (InterruptedException e1) {
+                  watcher.onClose(new KubernetesClientException("Connection unexpectedly closed", e1));
+                  return;
+                }
+                onClose(code, reason);
+              }
+            } catch (MalformedURLException | InterruptedException e) {
+              throw KubernetesClientException.launderThrowable(e);
+            }
+          }
+        });
       }
     });
   }

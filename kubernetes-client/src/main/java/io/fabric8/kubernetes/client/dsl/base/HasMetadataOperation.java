@@ -17,7 +17,7 @@
 package io.fabric8.kubernetes.client.dsl.base;
 
 import com.squareup.okhttp.OkHttpClient;
-import io.fabric8.kubernetes.api.builder.Visitor;
+import io.fabric8.kubernetes.api.builder.Function;
 import io.fabric8.kubernetes.api.model.Doneable;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.KubernetesResourceList;
@@ -31,21 +31,15 @@ import java.util.concurrent.TimeUnit;
 public class HasMetadataOperation<T extends HasMetadata, L extends KubernetesResourceList, D extends Doneable<T>, R extends ClientResource<T, D>>
   extends BaseOperation< T, L, D, R> {
 
-  protected HasMetadataOperation(OkHttpClient client, Config config, String apiGroup, String apiVersion, String resourceT, String namespace, String name, Boolean cascading, T item, String resourceVersion, Boolean reloadingFromServer) {
-    super(client, config, apiGroup, apiVersion, resourceT, namespace, name, cascading, item, resourceVersion, reloadingFromServer);
+  protected HasMetadataOperation(OkHttpClient client, Config config, String apiGroup, String apiVersion, String resourceT, String namespace, String name, Boolean cascading, T item, String resourceVersion, Boolean reloadingFromServer, long gracePeriodSeconds) {
+    super(client, config, apiGroup, apiVersion, resourceT, namespace, name, cascading, item, resourceVersion, reloadingFromServer, gracePeriodSeconds);
   }
-
-  //protected HasMetadataOperation(OkHttpClient client, Config config, String apiGroup, String apiVersion, String resourceT, String namespace, String name, Boolean cascading, T item, Class<T> type, Class<L> listType, Class<D> doneableType) {
-  //  super(client, config, apiGroup, apiVersion, resourceT, namespace, name, cascading, item, resourceVersion, type, listType, doneableType);
- // }
 
   @Override
   public D edit() throws KubernetesClientException {
-    final BaseOperation oper = this;
-
-    final Visitor<T> visitor = new Visitor<T>() {
+    final Function<T, T> visitor = new Function<T, T>() {
       @Override
-      public void visit(T resource) {
+      public T apply(T resource) {
         try {
           if (isCascading() && !isReaping()) {
             if (reaper != null) {
@@ -53,7 +47,7 @@ public class HasMetadataOperation<T extends HasMetadata, L extends KubernetesRes
               reaper.reap();
             }
           }
-          replace(resource);
+          return replace(resource);
         } catch (Exception e) {
           throw KubernetesClientException.launderThrowable(e);
         }
@@ -62,7 +56,7 @@ public class HasMetadataOperation<T extends HasMetadata, L extends KubernetesRes
 
     try {
       T item = getMandatory();
-      return (D) getDoneableType().getDeclaredConstructor(getType(), Visitor.class).newInstance(item, visitor);
+      return (D) getDoneableType().getDeclaredConstructor(getType(), Function.class).newInstance(item, visitor);
     } catch (InvocationTargetException | NoSuchMethodException | IllegalAccessException | InstantiationException e) {
       throw KubernetesClientException.launderThrowable(e);
     }
